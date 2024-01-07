@@ -1,0 +1,1631 @@
+<html>
+  <body>
+        
+Ever since I learned about evolutive algorithms, I've been fascinated by them. This class of algorithms use concepts from evolution, such as diversity and selection, to learn how to solve problems _they know nothing about_. It seems both magical and too good to be true ; and at the same time, being based on evolution, makes complete sense.
+
+There's also something strangely satisfying in grooming new AI breeds and savagely kill them because they're not "fit enough".
+
+NEAT is a neuroevolutive genetic machine learning algorithm. The [paper presenting it](http://nn.cs.utexas.edu/downloads/papers/stanley.ec02.pdf) is sufficiently clear to give a good guideline to implement it from scratch.
+
+In this post, I will build a game of snake, then groom an AI that masters it _without ever even knowing it's playing snake_. The entirety of the code is in the post itself[^1], feel free to look at the source to figure what's happening. If you don't want the details, you can skip directly to [the conclusion](#fight), and watch a virtual species learn how to play snake directly in your browser!
+
+# The game
+
+We will start with a simple game of snake. You can play it with the IJKL keys of your keyboard:
+
+<button id="play-one">Play</button>
+<pre id="one"></pre>
+
+<script>
+  const computerIsOn = true
+  const one = document.getElementById("one")
+  const playOne = document.getElementById("play-one")
+  
+  const maxGameLength = 10000
+
+  const cell = { empty: 0, body: -1, apple: 1 }
+  const directions = { none: 0, up: 2, right: 3, down: 4, left: 5, turnLeft: -1, turnRight: 1 }  
+  const mapDir = (dir, currDir) => {
+    if (dir === directions.turnLeft || dir === directions.turnRight) {
+      dir = (currDir.dir - dir) % 4 + 2 // we're using a trick, directions are ordered circularly, and we just shift
+    }
+
+    return dir === directions.up ? { col: 0, row: -1, dir }
+      : dir === directions.down ? { col: 0, row: 1, dir }
+      : dir === directions.left ? { col: -1, row: 0, dir }
+      : { col: 1, row: 0, dir: directions.right }
+  }
+
+  const modPos = (pos, boardSize) => {
+    if (pos.col >= boardSize.cols) {
+      pos.col = 0
+    }
+    if (pos.col < 0) {
+      pos.col = boardSize.cols - 1
+    }
+    if (pos.row >= boardSize.rows) {
+      pos.row = 0
+    }
+    if (pos.row < 0) {
+      pos.row = boardSize.rows - 1
+    }
+    return pos
+  }
+  const genPos = (boardSize) => ({
+      col: Math.floor(Math.random() * boardSize.cols),
+      row: Math.floor(Math.random() * boardSize.rows),
+    })
+  const isInSnake = (pos, snake) => {
+    return snake.findIndex((body) => body.col === pos.col && body.row === pos.row) >= 0
+  }
+  const genApple = (snake, boardSize) => {
+    let pos = genPos(boardSize)
+    let count = 0
+    while(isInSnake(pos, snake) && count++ < boardSize.cols * boardSize.rows) {
+      pos.col++
+      if (pos.col >= boardSize.cols) {
+        pos.row++
+        pos.col = 0
+      }
+      if (pos.row >= boardSize.rows) {
+        pos.row = 0
+      }
+    }
+    return pos
+  }
+
+  const sleepAsync = (ms) => new Promise((resolve) => setTimeout(() => resolve(), ms))
+  const renderCell = (c) =>
+      c === cell.empty ? " "
+    : c === cell.body ? "O"
+    : "*"
+    
+  const render = (elt) => 
+    (board, pos, fitness, playerName) => elt.innerText = board.map(row => '|' + row.map(renderCell).join(" ") + '|').join('\n') + '\nPlayer: ' + playerName + '\nFitness: ' + (Math.round(fitness * 1000) / 1000)
+
+  const mapToBoard = (snake, apple, dir, boardSize) => {
+    const board = []
+    for(let row = 0; row < boardSize.rows; row++) {
+      const row = []
+      board.push(row)
+      for(let col = 0; col < boardSize.cols; col++) {
+        row.push(cell.empty)
+      }
+    }
+    snake.forEach((c, i) => {
+      position = c
+      board[position.row][position.col] = cell.body
+    })
+    board[apple.row][apple.col] = cell.apple
+    return board
+  }
+  const keyboardIJKLPlayer = (() => {
+    let dir = directions.none
+    document.addEventListener("keydown", (evt) => {
+      if (evt.key === "j") { dir = directions.left }
+      if (evt.key === "i") { dir = directions.up }
+      if (evt.key === "l") { dir = directions.right }
+      if (evt.key === "k") { dir = directions.down }
+    })
+    return {
+      play: (board) => {
+        const res = dir
+        dir = directions.none
+        return res
+      },
+      name: "Keyboard (I/J/K/L)"
+    }
+  })()
+
+
+  const gameAsync = async function(player, { render, wait, transform, maxGame = maxGameLength, boardSize }) {
+    let dir = {row: 0, col: 1, dir: directions.right }
+    const snake = [genPos(boardSize)]
+    let apple = genApple(snake, boardSize)
+    let iterations = 0
+    let iterationsSinceLastMove = 0
+    let iterationsSinceLastFood = 0
+
+    while(snake.length < boardSize.cols * boardSize.rows - 1 
+      && iterations++ < maxGame
+      && iterationsSinceLastMove++ < (boardSize.rows * 10)
+      && iterationsSinceLastFood++ < 100
+      ) {
+      const newHead = modPos({
+        col: snake[snake.length - 1].col + dir.col,
+        row: snake[snake.length - 1].row + dir.row
+      }, boardSize)
+      if (isInSnake(newHead, snake)) {
+        // lost
+        break;
+      }
+      if (newHead.col === apple.col && newHead.row === apple.row) {
+        // apple is eaten, create new apple, and don't shrink tail
+        apple = genApple(snake, boardSize)
+        iterationsSinceLastFood = 0
+      } else {
+        // just moving.
+        snake.shift()
+      }
+      snake.push(newHead)
+      const board = mapToBoard(snake, apple, dir, boardSize)
+      let transformed = board
+      if (transform) {
+        transformed = transform(board, newHead, dir, boardSize)
+      }
+      render(transformed, newHead, document.calculateFitness(snake, iterations), player.name)
+      const play = player.play(board, newHead, dir)
+      if (play !== directions.none) {
+        dir = mapDir(play, dir)
+        iterationsSinceLastMove = 0
+      }
+      await wait()
+    }
+    return document.calculateFitness(snake, iterations)
+  }
+
+  let playingOne = false
+  
+  playOne.onclick = () => {
+    if (playingOne) {
+      return
+    }
+    playingOne = true
+    gameAsync(keyboardIJKLPlayer, {render: render(one), wait: () => sleepAsync(250), boardSize: {cols: 16, rows: 16}})
+      .then(() => {
+        playingOne = false
+      })
+  }
+</script>
+
+Now that's all well an fun, but we need to simplify the problem for the algorithm. We center the game on the player and rotate so that straight forward is up. That way the problem becomes relative to the snake, rather than absolute to the board.
+
+Since directions are now relative, commands should also be: we'll use U and O to turn left and right:
+
+<button id="play-three">Play</button>
+<pre id="three"></pre>
+
+<script>
+
+  const three = document.getElementById("three")
+  const playThree = document.getElementById("play-three")
+  const centerBoard = (board, centerOnPosition, boardSize) => {
+    const dRow = centerOnPosition.row - Math.floor(boardSize.rows / 2)
+    const dCol = centerOnPosition.col - Math.floor(boardSize.cols / 2)
+    const modRow = (row) => (boardSize.rows + row + dRow) % boardSize.rows
+    const modCol = (col) => (boardSize.cols + col + dCol) % boardSize.cols
+    const newBoard = []
+    for(let row = 0; row < boardSize.rows; row++) {
+      const newRow = []
+      for (let col = 0; col < boardSize.cols; col++) {
+        newRow.push(board[modRow(row)][modCol(col)])
+      }
+      newBoard.push(newRow)
+    }
+    return newBoard
+  }
+
+  const mapToBoardCentered = (board, pos, dir, boardSize) => {
+    const centered = centerBoard(board, pos, boardSize)
+    return centered
+  }
+
+  const keyboardUOPlayer = (() => {
+    let dir = directions.none
+    document.addEventListener("keydown", (evt) => {
+      if (evt.key === "u") { dir = directions.turnLeft }
+      if (evt.key === "o") { dir = directions.turnRight }
+    })
+    return {
+      play: (board) => {
+        const res = dir
+        dir = directions.none
+        return res
+      },
+      name: "keyboard (U/O)"
+    }
+  })()
+
+  const rotateBoard = (board, {dir}, boardSize) => {
+    // A bit counter intuitive, we calculate the cell to be
+    // taken from source rather than the target. Result is that
+    // left and right are reversed
+    const transformPos = ( row, col) =>
+        dir === directions.down ? { row: -row , col: -col }
+      : dir === directions.right ? { row: col, col: -row}
+      : dir === directions.left ? { row: -col, col: row }
+      : { row, col }
+    const modPos = ({ row, col }) => ({
+      row: (row + boardSize.rows) % boardSize.rows,
+      col: (col + boardSize.cols) % boardSize.cols
+    })
+    const newBoard = []
+    for(let row = 0; row < boardSize.rows; row++) {
+      const newRow = []
+      for (let col = 0; col < boardSize.cols; col++) {
+        const pos = modPos(transformPos(row, col))
+        newRow.push(board[pos.row][pos.col])
+      }
+      newBoard.push(newRow)
+    }
+    newBoard["original"] = board["original"]
+    return newBoard
+  }
+
+  mapToBoardCenteredAndRotated = (board, pos, dir, boardSize) => {
+    const centered = mapToBoardCentered(board, pos, dir, boardSize)
+    const rotated = rotateBoard(centered, dir, boardSize)
+    return rotated
+  }
+
+  let playingThree = false
+  
+  playThree.onclick = () => {
+    if (playingThree) {
+      return
+    }
+    playingThree = true
+    gameAsync(keyboardUOPlayer, {
+      render: render(three), 
+      transform: mapToBoardCenteredAndRotated, 
+      boardSize: { rows: 10, cols: 10 },
+      wait: () => sleepAsync(250), 
+    }).then(() => playingThree = false)
+  }
+</script>
+
+It gets harder to play as a human, but the problem we are looking at is now standardized. Apples are passing by, and you want to turn to hit them, without eating you tail.
+
+Behind the scenes, the board is encoded as a set of numbers. 0 are empty, 1 is an apple, and -1 is the snake's body. This matrix, from the snake's point of view, is what the AI will see[^2].
+
+Now, we've got something working that we can feed the computer. Time to switch to the AI
+
+# Genomes
+
+We will build a neural network that will learn how to play this game. In fact, we will build a bunch of these, kill the worst, keep the best, make them mate together, take their progeny, expose them to radiations for accelerated mutations, and keep iterating till we find one that actually works. Pretty atrocious algorithm if you push the metaphor. But efficient.
+
+We'll loosely follow [Neuro Evolution of Augmenting Topologies](http://nn.cs.utexas.edu/downloads/papers/stanley.ec02.pdf). There are a few bits we need to build.
+
+- Two entities: genomes, and networks. Networks take inputs, transform them to output. Like in biology, genomes are the encoding of the network.
+- Convert genetic material to a functional network.
+- Handle mating and mutations
+- Handle our collection of genomes, notably ablation (removing the least fit)
+- A loop to orchestrate all that, iterate, run the game, etc.
+
+NEAT uses a _genome_ that encodes each individual's brain wiring. As with biology, it represents the information transmitted from a generation to the next through mating. It's also how mutations are introduced. This genome is then expressed as a functional brain that allows an individual to decide what to do based on what it sees.
+
+The genome encodes links and neurons.
+
+We'll use this structure:
+
+<pre>
+interface Link {
+  innovationId: string,
+  from: neuron,
+  to: neuron,
+  weight: number, // 0 .. 1
+  enabled: bool
+}
+
+interface Neuron {
+  type: "in" | "out" | "hidden",
+  pos: {                    // when type = in
+    row: number, 
+    col: number 
+  }, 
+  dir: "left" | "right",    // when type = out
+  neuronId: number  // when type = hidden
+}
+
+interface Genome {
+    links: Link[],
+    genomeId: number,
+    speciesId: number,
+    neurons: Neuron[]
+}
+</pre>
+
+First let's look at an intelligently designed organism's genome. These are the link genes for a genome: (we don't show the neurons because they don't carry any more information).
+
+<div id="genome-2"> </div>
+
+<script type="module">
+  import { Genome, Neuron, Link, neuronTypes, Visualization } from "/dist/index.js";
+
+  const genomeTwo = document.getElementById("genome-2")
+
+  const createDemoLinks = (boardSize) => {
+    let innovationId = 0
+    const neurons = []
+    const links = []
+
+    const left = new Neuron(neuronTypes.out, { direction: directions.turnLeft, toString: () => "Left" }, innovationId++)
+    const right = new Neuron(neuronTypes.out, { direction: directions.turnRight, toString: () => "Right" }, innovationId++)
+    neurons.push(left)
+    neurons.push(right)
+
+    // Turn to eat apple. Positions are relational.
+    for (let i = -Math.floor((boardSize.cols) / 2); i < Math.floor((boardSize.cols) / 2); i++) {
+      if (i !== 0) {
+        const neuron = new Neuron(neuronTypes.in, {row: 0, col: i, toString: () => `0 X ${i}`}, innovationId++)
+        neurons.push(neuron)
+        links.push(new Link(
+          innovationId++, 
+          neuron, 
+          (i < 0) ? left : right,
+          .8))
+      }
+    }
+    // Turn to avoid body
+    for (let i = - 1; i <= 1; i++) {
+      const neuron = new Neuron(neuronTypes.in, {row: 1, col: i, toString: () => `1 X ${i}`}, innovationId++)
+      neurons.push(neuron)
+      links.push(new Link(
+        innovationId++, 
+        neuron, 
+        (i < 0) ? right: left,
+        -.8))
+    }
+    return { links, neurons }
+  }
+
+  document.demoGenomeBoardSize = {rows: 10, cols: 10}
+  const demoStuff = createDemoLinks(document.demoGenomeBoardSize)
+  document.demoGenome = new Genome(
+    0, // Genome id
+    0, // Species id
+    demoStuff.neurons,
+    demoStuff.links,
+  );
+
+  genomeTwo.innerHTML = Visualization.explainGenome(document.demoGenome)
+</script>
+
+Each of the genes is encoding a link from a neuron to another. The number on top of each gene is called the "innovation number". We'll come back to it in a moment.
+
+The neurons formatted like "1x2" are input neurons. They represent coordinates relative to the player. The first number is in-front/behind. In front is > 0, behind is < 0. The second number is left/right. Negative is left, positive is right. 
+
+Neurons indicating directions are output neurons. Neurons prefixed by a "H" are hidden neurons: they're neurons internal to the network. There aren't any in that specific network.
+
+Here is a view of the topology it generates:
+
+<div id="genome-1" style="text-align: left; width: 100%; height: 600px; border: 1px solid lightgray;"></div>
+
+<script src="/demo_libs/vis-network.js"> </script>
+
+<script type="module">
+  import { Visualization } from "/dist/index.js";
+  const genomeOne = document.getElementById("genome-1")
+  Visualization.genomeToGraph(document.demoGenome, genomeOne)
+</script>
+
+Looking at it, we see links with a positive weight from the left of the snake to the "left" direction, and from the right of the snake to the "right" direction. This weight acts as a factor to the value in the corresponding cell. Apples are encoded with a 1. This means that if an apple is seen to the right of the snake, the cell will send a positive and significant signal to the right neuron, and correspondingly, the snake will turn right. Respectively to the left.
+
+We also see a few links with negative weight in front of the snake. Body is encoded negatively, and so, if a body is seen, a positive signal will be sent to the left or right neuron, preventing the snake to eat itself.
+
+Let's see what it can do. We'll transform the genome into a set of functions. There will be one function per output, taking the board as input, and determine how much the output is activated, applying an activation function over the sum of the incoming signal.
+
+<script type="module">
+  import { Visualization } from "/dist/index.js";
+  document.demoReduction = document.demoGenome.reduce()
+</script>
+
+Starting small, we simulate the board positionally to our snake: (use ^ > < v to change its direction), the output receives the following activation:
+
+<div id="reduction-1"> </div>
+
+<script type="module">
+
+  const reductionOne = document.getElementById("reduction-1")
+
+  window.positionPicker = (boardSize) => {
+    const pickPosition = ({row, col}, position, currentDirection) => {
+      const rotate = ({row, col}) =>
+          currentDirection === directions.down ? { row: row , col: -col }
+        : currentDirection === directions.right ? { row: col, col: row}
+        : currentDirection === directions.left ? { row: -col, col: -row }
+        : { row: -row, col }
+      const modPos = ({ row, col }) => ({
+        row: (row + boardSize.rows) % boardSize.rows,
+        col: (col + boardSize.cols) % boardSize.cols
+      })
+      const shift = ({ row, col }) => ({
+        row: row + position.row,
+        col: col + position.col
+      })
+      const pos = modPos(shift(rotate({row, col})))
+      return pos
+    }
+    return pickPosition
+  }
+
+  let demoDir = directions.up
+
+  window.updateDir = () => {
+    const val = document.getElementById("demo-dir").value
+    demoDir = 
+        val === ">" ? directions.right
+      : val === "<" ? directions.left
+      : val === "v" ? directions.down
+      : directions.up
+    document.getElementById("demo-res").innerHTML = `
+      Activation for right: ${document.demoReduction.Right(board.get)} <br/>
+      Activation for left: ${document.demoReduction.Left(board.get)}`
+  }
+
+  window.updateDemoBoard = (row, col) => {
+    board[row][col] = Number.parseInt(document.getElementById(`demo-${row}-${col}`).value) || 0
+    document.getElementById("demo-res").innerHTML = `
+      Activation for right: ${document.demoReduction.Right(board.get)} <br/>
+      Activation for left: ${document.demoReduction.Left(board.get)}`
+  }
+
+  let rows = []
+  const board = []
+  const picker = window.positionPicker(document.demoGenomeBoardSize)
+  board.get = ({row, col}) => {
+    const p = picker({row, col}, demoPos, demoDir)
+    return board[p.row][p.col]
+  }
+  const demoPos = {
+    row: Math.floor(document.demoGenomeBoardSize.rows / 2),
+    col: Math.floor(document.demoGenomeBoardSize.cols / 2)
+  }
+  for(let row = 0; row < document.demoGenomeBoardSize.rows; row++) {
+    const newRow = []
+    const cols = []
+    for (let col = 0; col < document.demoGenomeBoardSize.cols; col++) {
+      newRow.push(0)
+      if (row !== demoPos.row || col !== demoPos.col){
+        cols.push(`<td>
+        <input id="demo-${row}-${col}" style="width: 2em" onkeyup="window.updateDemoBoard(${row}, ${col})" value="0" />
+</td>`)
+      } else {
+        cols.push(`<td>
+        <input id="demo-dir" style="width: 2em" onkeyup="window.updateDir()" value="^" />
+</td>`)
+      }
+    }
+    board.push(newRow)
+    rows.push(`<tr>${cols.join("")}</tr>`)
+  }
+  const table = `<table>${rows.join("")}<table><div id="demo-res"></div>`
+
+  reductionOne.innerHTML = table
+
+</script>
+
+Any activation greater than .5 will activate the neuron. If both sides are above, the strongest activation wins.
+
+We now have a functional transformation of the genome into an activation function. The last step is to build a player from that and let it play snake. Hit play below:
+
+<button id="play-four">Play</button>
+<pre id="four"></pre>
+
+<script>
+
+  const four = document.getElementById("four")
+  const playFour = document.getElementById("play-four")
+
+  const AIPlayer = (reduction, name, boardSize) => {
+    const activation = 0.5
+    const pickPosition = window.positionPicker(boardSize)
+
+    return {
+      play: (board, position, currentDirection) => {
+        let dir = directions.none
+        let b = {
+          get: ({row, col}) => {
+            const p = pickPosition({row, col}, position, currentDirection.dir)
+            return board[p.row][p.col]
+          }
+        }
+        const activationLeft = reduction.Left(b.get)
+        const activationRight = reduction.Right(b.get)
+        if (activationLeft > activation && activationLeft > activationRight) {
+          return directions.turnLeft
+        } else if (activationRight > activation) {
+          return directions.turnRight
+        } else {
+          return directions.none
+        }
+      },
+      name
+    }
+  }
+
+  const renderOriginal = (elt) => {
+    const r = render(elt)
+    return (board, pos, fitness, playerName) => {
+      r(board["original"], pos, fitness, playerName)
+    }
+  }
+
+  playFour.onclick = () => {
+    gameAsync(AIPlayer(document.demoReduction, "demo AI", document.demoGenomeBoardSize), {render: render(four), wait: () => sleepAsync(60),
+    boardSize: document.demoGenomeBoardSize})
+  }
+
+</script>
+
+This is a pretty simple genome, but it works ok. It turns whenever it sees an apple or when it's gonna eat itself. Running it a few times already teaches us a few things. A) it's much faster than you at snake. B) it's not perfect, despite being intelligently designed. Or it might just be that its designer is not that intelligent C) scores are not entirely deterministic.
+
+Let's try to understand how much runs settle a good average with a few simulations. It will be an indication for this specific species, but should still give a good order of magnitude.
+
+<p>
+  <button id="monte-carlo-btn">Run</button>
+  <input id="monte-carlo-input" value="10"/> iterations 
+  <div id="monte-carlo"></div>
+</p>
+
+<script>
+
+// // Fitness is simply the number of apples that were eaten. If we wanted a factor for speed as well the number of iterations can be factored in as a divider
+document.calculateFitness = (snake, iterations) => snake.length; //+ snake.length / iterations
+
+// const monteCarlo = document.getElementById("monte-carlo")
+// const monteCarloBtn = document.getElementById("monte-carlo-btn")
+// const monteCarloInput = document.getElementById("monte-carlo-input")
+
+// const noRender = (board, head, score, name) => {}
+
+// const runGameAsync = async (reduction, iterations, name, boardSize) => {
+//   let totalFitness = 0
+//   let maxFitness = 0
+//   let minFitness = 10000000
+//   const player = AIPlayer(reduction, name, boardSize)
+//   for(let i = 0; i < iterations; i++) {
+//     const fitness = await gameAsync(player, {render: noRender, boardSize, wait: () => Promise.resolve()})
+//     if (maxFitness < fitness) {
+//       maxFitness = fitness
+//     }
+//     if (minFitness > fitness) {
+//       minFitness = fitness
+//     }
+//     totalFitness += fitness
+//   }
+//   return {
+//     maxFitness,
+//     minFitness,
+//     avgFitness: totalFitness / iterations
+//   }
+// }
+
+// monteCarloBtn.onclick = () => {
+//   const iterations = Number.parseInt(monteCarloInput.value) || 0
+//   const start = Date.now()
+//   runGameAsync(document.demoReduction, iterations, "demo mc", { rows: 10, cols: 10}).then(({maxFitness, minFitness, avgFitness}) => {
+//     const finish = Date.now()
+//     const timeMs = (finish - start)
+//     monteCarlo.innerHTML = `<b>Average fitness: </b>${avgFitness}<br/>
+//     <b>Min: </b>${minFitness}<br/>
+//     <b>Max: </b>${maxFitness}<br/>
+//     <b>Duration:</b> ${timeMs} ms<br/>
+//     <b>Iteration avg (ms):</b> ${timeMs / iterations} ms<br/>
+//     `
+//   })
+// }
+
+</script>
+
+This yields interesting results. First, we see a significant spread between min and max. Second, we see that the game is not terribly optimized, and iterations take a few ms each. Third, we observe that the average results are consistent to +/-5% over 5 iterations, +/- 10% over 10 iterations, and about +/- 2% over 100 iterations.
+
+We are directly using an average of the score over a few rounds as the fitness function. The fitness is how we determine how well a genome is doing.
+
+Figuring the right number of rounds per species is a balancing game between obtaining precise results each round, and having more rounds. 10% fidelity seems enough.
+
+# Evolution
+
+We have the basic elements that will allow for an AI to play. The next step is to build the evolutionary loop that will breed genomes capable of playing the game, and maybe beat our simple intelligent design genome.
+
+There are two aspects to evolution. **Variation**: changing the species ; and **selection**: survival of the fittest. Let's focus on variation first.
+
+## Variation
+
+Variation is the set of mechanisms changing the genome of a species. It introduces entropy in the system so that better fitted (and worse...) species appear.
+
+### Mutation
+
+The first mechanism of variation is mutation, introducing random changes within a genome. Since we can't actually use radiation to modify our virtual genome, we'll have to directly touch the genes with that.
+
+We can mutate genome by changing the existing genes: activating deactivated genes and vice-versa, or randomizing the weight of existing links. We can also create new genes, i.e. create new connections, and new neurons. The example below is applying a healthy amount of variation on a genome.
+
+<div style="text-align: left" id="mutate-in"></div>
+<div id="mutate-in-graph"  style="border: 1pt solid; padding: 3px; height: 400px"></div>
+<button id="mutate-button">Mutate</button> with probabilities ([0, 1]) for mutation on
+weight: <input id="mutate-weight" style="width: 2em" value="0.1" />
+enable: <input id="mutate-enable" style="width: 2em" value="0.1" />
+disable: <input id="mutate-disable" style="width: 2em" value="0.1" />
+split link: <input id="mutate-split" style="width: 2em" value="0.1" />
+new link: <input id="mutate-insert" style="width: 2em" value="0.1" />
+<div style="text-align: left" id="mutate-out"></div>
+<div id="mutate-out-graph"  style="border: 1pt solid; padding: 3px; height: 400px"></div>
+
+<script>
+
+  // const mutateBtn = document.getElementById("mutate-button")
+  // const mutateIn = document.getElementById("mutate-in")
+  // const mutateInGraph = document.getElementById("mutate-in-graph")
+  // const mutateOut = document.getElementById("mutate-out")
+  // const mutateOutGraph = document.getElementById("mutate-out-graph")
+  // const mutateWeight = document.getElementById("mutate-weight")
+  // const mutateInsert = document.getElementById("mutate-insert")
+  // const mutateSplit = document.getElementById("mutate-split")
+  // const mutateDisable = document.getElementById("mutate-disable")
+  // const mutateEnable = document.getElementById("mutate-enable")
+  
+  // const cloneGenome = (genome) => {
+  //   const cloned = {
+  //     links: [],
+  //     genomeId: genome.genomeId,
+  //     speciesId: genome.speciesId,
+  //     neurons: [...genome.neurons]
+  //   }
+  //   genome.links.forEach(link => {
+  //     const { innovationId, from, to, weight, enabled } = link
+  //     const clonedLink = {
+  //       innovationId,
+  //       from,
+  //       to,
+  //       weight,
+  //       enabled
+  //     }
+  //     cloned.links.push(clonedLink)
+  //   })
+  //   return cloned
+  // }
+
+  // const pick = (arr) => arr[Math.floor(Math.random() * arr.length)]
+
+  // const neuronsAreEqual = (a, b) =>
+  //   a.type === b.type &&
+  //   a.dir === b.dir &&
+  //   a.neuronId === b.neuronId &&
+  //   ( (!a.pos && !b.pos) ||
+  //     (a.pos?.row === b.pos?.row &&
+  //      a.pos?.col === b.pos?.col))
+
+  // const graphContainsCycle = (links, neuron, originNeuron, maxIterations = 100) => {
+  //   if (neuron === originNeuron) {
+  //     return true
+  //   }
+  //   const nextNeurons = links.filter(link => link.from === neuron).map(link => link.to)
+  //   if (nextNeurons.length === 0) {
+  //     return false
+  //   }
+  //   return nextNeurons.map(neuron => graphContainsCycle(links, neuron, originNeuron, maxIterations - 1)).indexOf(true) >= 0
+  // }
+
+  // const mutateGenome = (genome, innovationCounter, mutationParameters) => {
+  //   const { mutateWeight, mutateEnabled, mutateDisabled, mutateSplit, mutateInsert } = mutationParameters
+  //   const mutatedGenome = cloneGenome(genome)
+  //   const newLinks = []
+  //   mutatedGenome.links.forEach(link => {
+  //     // mutate weights
+  //     if (Math.random() < mutateWeight) {
+  //       link.weight = Math.random() * 2 - 1
+  //     }
+  //     // disable links
+  //     if (Math.random() < mutateDisabled && link.enabled) {
+  //       link.enabled = false
+  //     }
+  //     // enable links
+  //     if (Math.random() < mutateEnabled && !link.enabled) {
+  //       link.enabled = true
+  //     }
+  //     // split links
+  //     if (Math.random() < mutateSplit) {
+  //       link.enabled = false
+  //       const innovation = innovationCounter.innovationForLinkSplit(link.from, link.to)
+  //       const newNeuron = createNeuron(neuronTypes.hidden, undefined, undefined, innovation.neuron)
+  //       // We check if that neuron doesn't already exist
+  //       // we need only check the first link because if it's
+  //       // there, the second always is, since that neuron id
+  //       // ALWAYS gets inserted in that exact position.
+  //       if (!mutatedGenome.links.find((existingLink) => existingLink.innovationId === innovation.firstLink)) {
+  //         newLinks.push({
+  //           innovationId: innovation.firstLink,
+  //           from: link.from,
+  //           to: newNeuron,
+  //           weight: 1,
+  //           enabled: true
+  //         })
+  //         newLinks.push({
+  //           innovationId: innovation.secondLink,
+  //           from: newNeuron,
+  //           to: link.to,
+  //           weight: link.weight,
+  //           enabled: true
+  //         })
+  //       }
+  //     }
+  //   })
+  //   // insert new links
+  //   if (Math.random() < mutateInsert) {
+  //     const fromNeuron = pick(mutatedGenome.neurons.filter(neuron => neuron.type === neuronTypes.in 
+  //       || neuron.type === neuronTypes.hidden))
+  //     const toNeuron = pick(mutatedGenome.neurons.filter(neuron => neuron.type === neuronTypes.out 
+  //       || neuron.type === neuronTypes.hidden))
+  //     const innovation = innovationCounter.innovationForNewLink(fromNeuron, toNeuron)
+  //     // We check if that link doesn't already exist
+  //     if (!mutatedGenome.links.find((existingLink) => existingLink.innovationId === innovation) &&
+  //     fromNeuron !== toNeuron &&
+  //     // we also check for cycles, graph needs to be directed
+  //     !graphContainsCycle(mutatedGenome.links, toNeuron, fromNeuron)) {
+  //       newLinks.push({
+  //         innovationId: innovation,
+  //         from: fromNeuron,
+  //         to: toNeuron,
+  //         weight: Math.random() * 2 - 1,
+  //         enabled: true
+  //       })
+  //     }
+  //     // We check if it doesn't create a loop
+  //   }
+  //   mutatedGenome.links = mutatedGenome.links.concat(newLinks)
+  //   return mutatedGenome
+  // }
+
+  // const createDemo2 = (innovationCounter) => {
+  //   const neurons = []
+  //   const links = []
+  //   for(let i = 0; i < 6; i++) {
+  //     const neuron = createNeuron(neuronTypes.hidden, undefined, undefined, innovationCounter.nextNeuronInnovation())
+  //     neurons.push(neuron)
+  //   }
+  //   neurons.forEach((toNeuron, i) => {
+  //     if (i === 0 || i === 5) {
+  //       return
+  //     }
+  //     const fromNeuron = neurons[i - 1]
+  //     const innovation = innovationCounter.innovationForNewLink(fromNeuron, toNeuron)
+  //     links.push(createLink(
+  //       innovation, 
+  //       fromNeuron, 
+  //       toNeuron,
+  //       .5,
+  //       Math.random() > .2))
+  //   })
+  //   return {
+  //     links,
+  //     genomeId: 0,
+  //     speciesId: 0,
+  //     neurons
+  //   }
+  // }
+
+  // setTimeout(() => {
+  //   const demoGenomeInnovation = innovationCounter()
+  //   const demoGenome2 = createDemo2(demoGenomeInnovation)
+  //   mutateIn.innerHTML = explainGenome(demoGenome2)
+  //   genomeToGraph(demoGenome2, mutateInGraph)
+  //   mutateBtn.onclick = () => {
+  //     const mutation = {
+  //       mutateWeight: Number.parseFloat(mutateWeight.value),
+  //       mutateEnabled: Number.parseFloat(mutateEnable.value),
+  //       mutateDisabled: Number.parseFloat(mutateDisable.value),
+  //       mutateSplit: Number.parseFloat(mutateSplit.value),
+  //       mutateInsert: Number.parseFloat(mutateInsert.value)
+  //     }
+  //     const mutated = mutateGenome(demoGenome2, demoGenomeInnovation, mutation)
+  //     mutateOut.innerHTML = explainGenome(mutated)
+  //     genomeToGraph(mutated, mutateOutGraph)
+  //   }
+  // })
+  
+</script>
+
+### Mating
+
+The second mechanism of variation is mating. It allows traits to be propagated between generations by crossing the genomes of two individuals. Randomly merging topologies is hard: how do you know which neurons and links are matching between two genomes? How do you know if a given topology will make sense?
+
+NEAT offers a neat way of doing just that. It introduces the notion of _innovation_ to handle this. Every time a new neuron or a new link is inserted, we give it an **innovation number**. The innovation number is global. If two species evolve the same innovation (e.g. a new link between neurons A and B, or a new neuron C) it will get a single innovation number. NEAT therefor allows to trace ancestry and allows simple mating between genomes: a given gene's innovation id will be the same throughout genomes.
+
+We implement a dictionary that will generate innovation ids accordingly. If the neuron or the link gene is indeed new, it gets a new id. If it creates a topology that we already encountered, we reuse the same innovation id.
+
+<button id="innovation-id-demo-split-button">Insert neuron gene</button> between <input id="innovation-id-demo-split-a" value="A" style="width: 1em"/> and <input id="innovation-id-demo-split-b" value="B" style="width: 1em" />. Result:
+<div id="innovation-id-demo-split-result"> </div>
+
+<button id="innovation-id-demo-insert-button">Insert link gene</button> between <input id="innovation-id-demo-insert-a" value="A" style="width: 1em"/> and <input id="innovation-id-demo-insert-b" value="B" style="width: 1em" />. Result:
+<div id="innovation-id-demo-insert-result"> </div>
+
+<script>
+  
+  // const innovationIdDemoSplitBtn = document.getElementById("innovation-id-demo-split-button")
+  // const innovationIdDemoSplitA = document.getElementById("innovation-id-demo-split-a")
+  // const innovationIdDemoSplitB = document.getElementById("innovation-id-demo-split-b")
+  // const innovationIdDemoSplitRes = document.getElementById("innovation-id-demo-split-result")
+
+  // const innovationIdDemoInsertBtn = document.getElementById("innovation-id-demo-insert-button")
+  // const innovationIdDemoInsertA = document.getElementById("innovation-id-demo-insert-a")
+  // const innovationIdDemoInsertB = document.getElementById("innovation-id-demo-insert-b")
+  // const innovationIdDemoInsertRes = document.getElementById("innovation-id-demo-insert-result")
+
+  // const innovationCounter = () => {
+  //   const splitLinks = []
+  //   const newLinks = []
+  //   let innovation = 1
+  //   let neuronId = 1
+  //   let species = 1
+  //   let genomeCount = 1
+
+  //   // Force an innovation increment
+  //   const nextLinkInnovation = () => innovation++
+  //   const nextNeuronInnovation = () => neuronId++
+  //   const nextSpecies = () => species++
+  //   const genePoolSize = () => innovation
+  //   const nextGenome = () => genomeCount++
+
+  //   // Use NEAT's wait of splitting - innovation number is the same
+  //   // whenever the same link gets split.
+  //   const innovationForLinkSplit = (fromNeuron, toNeuron) => {
+  //     const link = splitLinks.find(link => neuronsAreEqual(link.fromNeuron, fromNeuron) && neuronsAreEqual(link.toNeuron, toNeuron))
+  //     if (link) {
+  //       return link.innovationIds
+  //     } else {
+  //       const newNeuron = {
+  //         type: "hidden",
+  //         neuronId: nextNeuronInnovation()
+  //       }
+  //       const innovationIds = {
+  //         firstLink: innovationForNewLink(fromNeuron, newNeuron),
+  //         secondLink: innovationForNewLink(newNeuron, toNeuron),
+  //         neuron: newNeuron.neuronId
+  //       }
+  //       const splitLinkRecord = {
+  //         fromNeuron,
+  //         toNeuron,
+  //         innovationIds
+  //       }
+  //       splitLinks.push(splitLinkRecord)
+  //       return innovationIds
+  //     }
+  //   }
+
+  //   // And also for insertion of new links, innovation id should always be the same
+  //   const innovationForNewLink = (fromNeuron, toNeuron) => {
+  //     const link = newLinks.find(link => neuronsAreEqual(link.fromNeuron, fromNeuron) && neuronsAreEqual(link.toNeuron, toNeuron))
+  //     if (link) {
+  //       return link.innovationId
+  //     } else {
+  //       const innovationId = nextLinkInnovation()
+  //       const linkRecord = {
+  //         fromNeuron,
+  //         toNeuron,
+  //         innovationId
+  //       }
+  //       newLinks.push(linkRecord)
+  //       return innovationId
+  //     }
+  //   }
+
+  //   return {
+  //     nextNeuronInnovation,
+  //     innovationForLinkSplit,
+  //     innovationForNewLink,
+  //     nextSpecies,
+  //     nextGenome,
+  //     genePoolSize
+  //   }
+  // }
+
+  // // Demo
+  // const demoInnovationCounter = innovationCounter()
+  // innovationIdDemoSplitBtn.onclick = () => {
+  //   const fromNeuron = { type: "hidden", neuronId: innovationIdDemoSplitA.value }
+  //   const toNeuron = { type: "hidden", neuronId: innovationIdDemoSplitB.value }
+  //   const innovation = demoInnovationCounter.innovationForLinkSplit(fromNeuron, toNeuron)
+  //   const neuronStyle = "display: inline-block; padding: 2pt; border: 1pt solid"
+  //   innovationIdDemoSplitRes.innerHTML = `<span style="${neuronStyle}">Neuron ${fromNeuron.neuronId}</span> -[ ${innovation.firstLink} ]-> <span style="${neuronStyle}">Neuron ${innovation.neuron}</span> -[ ${innovation.secondLink} ]-> <span style="${neuronStyle}">Neuron ${toNeuron.neuronId}</span>`
+  // }
+  // innovationIdDemoInsertBtn.onclick = () => {
+  //   const aVal = innovationIdDemoInsertA.value
+  //   const fromNeuron = { type: "hidden", neuronId: Number.parseInt(aVal) || aVal }
+  //   const bVal = innovationIdDemoInsertB.value
+  //   const toNeuron = { type: "hidden", neuronId: Number.parseInt(bVal) || bVal }
+  //   const innovationId = demoInnovationCounter.innovationForNewLink(fromNeuron, toNeuron)
+  //   innovationIdDemoInsertRes.innerHTML = "Innovation: " + innovationId
+  // }
+
+</script>
+
+Now we can proceed with mating. This happens between two genomes. Matching genes are selected randomly. Excess genes (which exist only on one of the genomes) are picked from the fittest parent. If fitness is equal, all are selected.
+
+<div style="text-align: left">
+  <div id="mating-genome-1"></div>
+  +
+  <div id="mating-genome-2"></div>
+</div>
+Fitness delta:
+<input id="mating-genome-fitness-delta" style="width: 2em" value="0" />
+(> 0 means genome on the left is fittest)<br/>
+<button id="mating-genome-btn">Mate</button>
+<div style="text-align: left" id="mating-genome-res"></div>
+Viewed as graph:
+<div>
+  <span id="mating-genome-1-graph" style="border: 1pt solid; display: inline-block; width: 45%; height: 300px"></span>
+  +
+  <span id="mating-genome-2-graph" style="border: 1pt solid; display: inline-block; width: 45%; height: 300px"></span>
+</div>
+= 
+<br/>
+<div id="mating-genome-res-graph"  style="border: 1pt solid; display: inline-block; width: 45%; height: 300px; margin: auto"></div>
+
+<script>
+  // const matingGenome1div = document.getElementById("mating-genome-1")
+  // const matingGenome2div = document.getElementById("mating-genome-2")
+  // const matingGenomeRes = document.getElementById("mating-genome-res")
+  // const matingGenomeBtn = document.getElementById("mating-genome-btn")
+  // const matingGenomeFitnessDeltaInput = document.getElementById("mating-genome-fitness-delta")
+  // const matingGenome1graph = document.getElementById("mating-genome-1-graph")
+  // const matingGenome2graph = document.getElementById("mating-genome-2-graph")
+  // const matingGenomeResGraph = document.getElementById("mating-genome-res-graph")
+
+  // // demo
+  // const demoMatingInnovation = innovationCounter()
+  // const matingMutation = {
+  //     mutateWeight: .25,
+  //     mutateEnabled: .25,
+  //     mutateDisabled: .25,
+  //     mutateSplit: .3,
+  //     mutateInsert: .5
+  //   }
+  // const demoGenome2 = createDemo2(demoMatingInnovation)
+  // const matingGenome1 = mutateGenome(demoGenome2, demoMatingInnovation, matingMutation)
+  // const matingGenome2 = mutateGenome(demoGenome2, demoMatingInnovation, matingMutation)
+  // matingGenome1div.innerHTML = explainGenome(matingGenome1)
+  // genomeToGraph(matingGenome1, matingGenome1graph)
+  // matingGenome2div.innerHTML = explainGenome(matingGenome2)
+  // genomeToGraph(matingGenome2, matingGenome2graph)
+  // matingGenomeBtn.onclick = () => {
+  //   const fitnessDelta = Number.parseFloat(matingGenomeFitnessDeltaInput.value) || 0
+  //   const matedGenome = mate(matingGenome1, matingGenome2, fitnessDelta, demoMatingInnovation)
+  //   matingGenomeRes.innerHTML = explainGenome(matedGenome)
+  //   genomeToGraph(matedGenome, matingGenomeResGraph)
+  // }
+
+  // // actual code
+  // const MATING_TOLERANCE = 0.01
+
+  // const copyGene = (gene) => ({
+  //   innovationId: gene.innovationId,
+  //   from: gene.from,
+  //   to: gene.to,
+  //   weight: gene.weight,
+  //   enabled: gene.enabled
+  // })
+
+  // // fitness delta is f(g1) - f(g2)
+  // const mate = (genome1, genome2, fitnessDelta, innovation) => {
+  //   let genePool = genome1.links.map(link => link.innovationId)
+  //   genome2.links.forEach(link => {
+  //     if (genePool.indexOf(link.innovationId) < 0) {
+  //       genePool.push(link.innovationId)
+  //     }
+  //   })
+  //   genePool = genePool.sort()
+  //   const child = {
+  //     genomeId: innovation.nextGenome(),
+  //     speciesId: null,
+  //     links: [],
+  //     neurons: []
+  //   }
+  //   // Push all common nodes
+  //   child.neurons.push(...genome1.neurons.filter(neuron => genome2.neurons.indexOf(neuron) >= 0))  
+  //   genePool.forEach(innovationId => {
+  //     const gene1 = genome1.links.find(gene => gene.innovationId === innovationId)
+  //     const gene2 = genome2.links.find(gene => gene.innovationId === innovationId)
+  //     let selectedGene
+  //     if (gene1 && gene2) {
+  //       selectedGene = pick([gene1, gene2])
+  //     } else if (fitnessDelta >= -MATING_TOLERANCE && gene1) {
+  //       selectedGene = gene1
+  //     } else if (fitnessDelta <= MATING_TOLERANCE && gene2) {
+  //       selectedGene = gene2
+  //     }
+  //     if (selectedGene) {
+  //       if (child.neurons.indexOf(selectedGene.from) < 0) {
+  //         child.neurons.push(selectedGene.from)
+  //       }
+  //       if (child.neurons.indexOf(selectedGene.to) < 0) {
+  //         child.neurons.push(selectedGene.to)
+  //       }
+  //       child.links.push(copyGene(selectedGene))
+  //     }
+  //   })
+  //   return child
+  // }
+
+</script>
+
+## Selection
+
+We have the basics of variation, now we'll tackle selection. This will happen by having generation after generation compete in our game, eliminate the lowest performers and select the fittest and breed them, rinse and repeat.
+
+NEAT introduces the concept of speciation, so that new genes that could be beneficial compete "locally" and have more chances to survive their introduction. We group genomes that are similar into species, operate selection and ablation within a species, mate, reassemble species, then carry on.
+
+### Species
+
+Compatibility distance is calculated based on the number of genes that differ, and the distance of weights.
+
+<div id="distance">
+  <button id="distance-generate-genomes">Generate genomes</button>
+  <div id="distance-genome-a" style="text-align: left"></div>
+  <div id="distance-genome-b" style="text-align: left"></div>
+  Distance using coefficients: 
+    weight: <input style="width: 2em" id="distance-coeff-weight" value=".25"/>
+    excess genes count: <input style="width: 2em" id="distance-coeff-excess" value="1"/>
+    disjointed genes count: <input style="width: 2em" id="distance-coeff-disjoint" value=".5"/>
+  <div id="distance-genome-res">Distance: 0</div>
+</div> 
+
+<script>
+
+  // const distanceGenerateGenomesBtn = document.getElementById("distance-generate-genomes")
+  // const distanceGenomeA = document.getElementById("distance-genome-a")
+  // const distanceGenomeB = document.getElementById("distance-genome-b")
+  // const distanceGenomeRes = document.getElementById("distance-genome-res")
+  // const distanceCoeffWeight = document.getElementById("distance-coeff-weight")
+  // const distanceCoeffDisjoint = document.getElementById("distance-coeff-disjoint")
+  // const distanceCoeffExcess = document.getElementById("distance-coeff-excess")
+
+  // // demo
+  // distanceGenerateGenomesBtn.onclick = () => {
+  //   const weightCoeff = Number.parseFloat(distanceCoeffWeight.value) || 0
+  //   const disjointCoeff = Number.parseFloat(distanceCoeffDisjoint.value) || 0
+  //   const excessCoeff = Number.parseFloat(distanceCoeffExcess.value) || 0
+  //   const coeffs = { weightCoeff, disjointCoeff, excessCoeff }
+
+  //   const demoMatingInnovation2 = innovationCounter()
+  //   const demoGenome2 = createDemo2(demoMatingInnovation2)
+  //   const genomeA = mutateGenome(demoGenome2, demoMatingInnovation2, matingMutation)
+  //   const genomeB = mutateGenome(demoGenome2, demoMatingInnovation2, matingMutation)
+  //   distanceGenomeA.innerHTML = explainGenome(genomeA)
+  //   distanceGenomeB.innerHTML = explainGenome(genomeB)
+  //   distanceGenomeRes.innerHTML = "Distance: " + distance(genomeA, genomeB, coeffs)
+  // }
+
+  // /**
+  //  *  Calculate distance between genomes
+  //  **/
+  // const distance = (genomeA, genomeB, coefficients) => {
+  //   const { disjointCoeff, excessCoeff, weightCoeff } = coefficients
+  //   let disjoint = 0
+  //   let excess = 0
+  //   let weightDeltas = 0
+  //   let matchingGenes = 0
+  //   let maxInnovationGenomeA = 0
+  //   let maxInnovationGenomeB = 0
+  //   // List all enabled links in genome A, find max innovation
+  //   let genomeALinks = genomeA.links
+  //     .filter(link => link.enabled)
+  //     .map(link => {
+  //       if (maxInnovationGenomeA < link.innovationId) {
+  //         maxInnovationGenomeA = link.innovationId
+  //       }
+  //     return link
+  //   })
+  //   // list all enabled links in genome B, find max innovation as well.
+  //   genomeB.links.filter(gene => gene.enabled).forEach(link => {
+  //     if (link.innovationId > maxInnovationGenomeB) {
+  //       maxInnovationGenomeB = link.innovationId
+  //     }
+  //     const index = genomeALinks.findIndex(linkA => linkA.innovationId === link.innovationId && linkA.enabled)
+  //     if (index < 0) {
+  //       if (link.innovationId > maxInnovationGenomeA) {
+  //         excess++
+  //       } else {
+  //         disjoint++
+  //       }
+  //     } else {
+  //       const geneA = genomeALinks[index]
+  //       matchingGenes++
+  //       weightDeltas += Math.abs(geneA.weight - link.weight)
+  //       genomeALinks.splice(index, 1) 
+  //     }
+  //   })
+  //   // these are all genes not found in genome B
+  //   genomeALinks.forEach(link => {
+  //     if (link.innovationId > maxInnovationGenomeB) {
+  //       excess++
+  //     } else {
+  //       disjoint++
+  //     }
+  //   })
+  //   // We use the max number of enabled genes in the genome as gene pool.
+  //   genePoolSize = Math.max(1, genomeA.links.filter(link => link.enabled).length, genomeB.links.filter(link => link.enabled).length)
+  //   return (matchingGenes ? weightCoeff * weightDeltas / matchingGenes : 0) +
+  //     excessCoeff * excess / genePoolSize + 
+  //     disjointCoeff * disjoint / genePoolSize
+  // }
+
+</script>
+
+Calculating distance allows to group genomes by species, and allowing the development of variations in a semi-protected environments. This happens by maintaining a list of species from a generation to the next. For each species an individual genome is picked randomly as a representative. Each individual from the new generation is placed with the first species with which it is compatible (i.e. compatibility > threshold). If it ain't compatible, then a new species is created, with that genome as representative.
+
+<pre>
+interface Species {
+  id: number,
+  representative: Genome,
+  genomes: Genome[],
+  speciesAge: number
+}
+</pre>
+
+<script>
+
+  // const compatibilityProvider = (coefficients, threshold) =>
+  //   (genomeA, genomeB) => {
+  //     if (!genomeA || !genomeB) {
+  //       console.warn(`Missing a genome`)
+  //       return false
+  //     }
+  //     const d = distance(genomeA, genomeB, coefficients)
+  //     return d < threshold
+  //   }
+
+  // const groupIntoSpecies = (speciesList, genomes, genomesAreCompatible, innovationCounter) => {
+  //   speciesList.forEach(species => {
+  //     species.representative = pick(species.genomes)
+  //     species.genomes = []
+  //   })
+  //   genomes.forEach(genome => {
+  //     for (let species of speciesList) {
+  //       if (genomesAreCompatible(species.representative, genome)) {
+  //         species.genomes.push(genome)
+  //         genome.speciesId = species.id
+  //         return
+  //       }
+  //     }
+  //     // No compatible species found
+  //     speciesList.push({
+  //       id: innovationCounter.nextSpecies(),
+  //       representative: genome,
+  //       genomes: [genome],
+  //       speciesAge: 0
+  //     })
+  //   })
+  // }
+
+</script>
+
+We now need to executing all of that. Starting with an initial population that has no link genes.
+
+<div id="initial-pop" style="text-align: left"></div>
+
+<script>
+
+//   const initialPop = document.getElementById("initial-pop")
+
+//   const createIONeurons = (boardSize, innovationCounter) => {
+//     const inputNeurons = []
+//     const outputNeurons = []
+
+//     outputNeurons.push(createNeuron(neuronTypes.out, undefined, directions.turnRight, innovationCounter.nextNeuronInnovation()))
+//     outputNeurons.push(createNeuron(neuronTypes.out, undefined, directions.turnLeft, innovationCounter.nextNeuronInnovation()))
+
+//     for(let row = - Math.floor(boardSize.rows / 2); row < Math.floor(boardSize.rows / 2); row++) {
+//       for (let col = - Math.floor(boardSize.cols / 2); col < Math.floor(boardSize.cols / 2); col++) {
+//         const neuron = createNeuron(neuronTypes.in, { row, col }, undefined, innovationCounter.nextNeuronInnovation())
+//         inputNeurons.push(neuron)
+//       }
+//     }
+//     return {inputNeurons, outputNeurons}
+//   }
+
+//   const createInitialGenome = ({inputNeurons, outputNeurons}, innovationCounter, boardSize) => {
+//   const links = []
+  
+
+//   // another strategy is to build all existing links deactivated.
+
+//   // inputNeurons.forEach((fromNeuron) => {
+//   //   outputNeurons.forEach((toNeuron) => {
+//   //     links.push(createLink(
+//   //       innovationCounter.innovationForNewLink(fromNeuron, toNeuron), 
+//   //       fromNeuron, 
+//   //       toNeuron,
+//   //       Math.random() * 2 -1,
+//   //       false))
+//   //   })
+//   // })
+//   return {
+//     links,
+//     genomeId: innovationCounter.nextGenome(),
+//     speciesId: 0,
+//     neurons: [...inputNeurons, ...outputNeurons]
+//   }
+// }
+
+// // initiate genomes with all genes from input -> output
+// // but disabled.
+// const initiateGenomes = (boardSize, initialPopulation, innovation) => {
+//   const genomes = []
+//   const ioNeurons = createIONeurons(boardSize, innovation)
+//   for(let i = 0; i < initialPopulation; i++) {
+//     const genome = createInitialGenome(ioNeurons, innovation, boardSize)
+//     genomes.push(genome)
+//   }
+//   return genomes
+// }
+
+// (() => {
+//   const innovation = innovationCounter()
+//   const demoGenomes3 = initiateGenomes({rows: 2, cols: 1}, 2, innovation)
+//   initialPop.innerHTML = demoGenomes3.map(explainGenome).join("\n")
+// })()
+
+// </script>
+
+// From there, we can make the population compete at snake and obtain their fitness:
+
+// <button id="run-demo-btn">Run</button>
+// <ul id="run-demo-results"></ul>
+
+// <script>
+//   const runDemoBtn = document.getElementById("run-demo-btn")
+//   const runDemoRes = document.getElementById("run-demo-results")
+
+//   const genomeName = genome => `Genome #${genome.genomeId}, species #${genome.speciesId}`
+
+//   const competeAsync = async (genomes, iterations, boardSize) => {
+//     const results = {}
+//     for (let genome of genomes) {
+//       const reduction = reduceGenome(genome)
+//       const fitness = await runGameAsync(reduction, iterations, genomeName(genome), boardSize)
+//       results[genome.genomeId] = fitness.avgFitness
+//       genome.fitness = fitness.avgFitness
+//     }
+//     return results
+//   }
+
+//   // demo
+//   runDemoBtn.onclick = () => {
+//     const genomes = []
+//     for(let i = 0; i < 10; i++) {
+//       const genome = mutateGenome(demoGenome, demoMatingInnovation, matingMutation)
+//       genome.genomeId = i + 1
+//       genomes.push(genome)
+//     }
+//     competeAsync(genomes, 5, document.demoGenomeBoardSize).then(res => {
+//       runDemoRes.innerHTML = genomes.map(genome => 
+//         `<li>Genome ${genome.genomeId}: Avg fitness: ${res[genome.genomeId]}</li>`
+//       ).join("\n")
+//     })
+//   }
+
+</script>
+
+Once we have the fitness, we prune the least fit portion of each species. A larger portion of eliminated species allows faster evolution, but also tends to remove evolutions that didn't have time to prove themselves. A good start is to keep 80%.
+
+We also remove under-performing species older than a given number of generations.
+
+<pre id="prune-demo"></pre>
+
+<script>
+//   const pruneDemo = document.getElementById("prune-demo")
+
+//   const pruneSpecies = (speciesList, competeResults, ageThreshold, pruneFactor = .5) => {
+//     // Looking at all results to eliminate stale species
+//     const allResults = Object
+//       .values(competeResults)
+//       .sort((a,b) => b - a)
+//     const medianFitnessForAllGenomes = allResults[Math.floor(allResults.length * pruneFactor)]
+//     speciesList.forEach(species => {
+//       species.genomes = species.genomes.sort((a, b) => b.fitness - a.fitness)
+//       species.genomes.splice(species.genomes.length * pruneFactor + 1)
+//       if (species.genomes.length === 0) {
+//         species.prune = true
+//       } else if (species.speciesAge >= ageThreshold){
+//         const medianGenomeForThisSpecies = species.genomes[Math.floor(species.genomes.length * pruneFactor)]
+//         const medianFitnessForThisSpecies = medianGenomeForThisSpecies.fitness
+//         if (medianFitnessForThisSpecies < medianFitnessForAllGenomes) {
+//           species.prune = true
+//         }
+//       }
+//     })
+//     while(true) {
+//       const i = speciesList.findIndex((species) => species.prune)
+//       if (i < 0) {
+//         break
+//       }
+//       speciesList.splice(i, 1)
+//     }
+//   }
+
+//   (() => {
+//     const genomes1 = [
+//       { genomeId: 1 },
+//       { genomeId: 2 },
+//       { genomeId: 3 }
+//     ]
+//     const genomes2 = [
+//       { genomeId: 4 },
+//       { genomeId: 5 },
+//       { genomeId: 6 },
+//       { genomeId: 7 }
+//     ]
+//     const genomes3 = [
+//       { genomeId: 8 }
+//     ]
+//     const results = {
+//       1: 3,
+//       2: 1,
+//       3: 2,
+//       4: 1,
+//       5: 3,
+//       6: 2,
+//       7: 4,
+//       8: 1
+//     }
+//     const species = [
+//       {genomes: genomes1, speciesAge: 1},
+//       {genomes: genomes2, speciesAge: 1},
+//       {genomes: genomes3, speciesAge: 6},
+//       ]
+//     const speciesToString = (species) => `${species.map((sp, i) => `- Species ${i}, age: ${sp.speciesAge}\n` + sp.genomes.map(g => `  - Genome #${g.genomeId}, fitness: ${results[g.genomeId]}`).join("\n")).join("\n")}`
+//     pruneDemo.innerHTML = `Inbound:\n${speciesToString(species)}`
+//     pruneSpecies(species, results, 5)
+//     pruneDemo.innerHTML += `
+
+// Pruned species:\n${speciesToString(species)}`
+// })()
+
+</script>
+
+We repopulate the remaining half through random breeding, sparkling some mutations to the mix.
+
+<script>
+
+  // const repopulate = (genomes, fitnessRes, targetPopulation, innovation, mutationCoeffs) => {
+  //   const newGenomes = []
+  //   while (genomes.length + newGenomes.length < targetPopulation) {
+  //     const genomeA = pick(genomes)
+  //     const genomeB = pick(genomes)
+  //     const fitnessDelta = genomeA.fitness - genomeB.fitness
+  //     const matedGenome = mate(genomeA, genomeB, fitnessDelta, innovation)
+  //     const mutatedGenome = mutateGenome(matedGenome, innovation, mutationCoeffs)
+  //     newGenomes.push(mutatedGenome)
+  //   }
+  //   genomes.push(...newGenomes)
+  // }
+
+  // // Just trying.
+
+  // // (() => {
+  // //   const innovation = innovationCounter()
+  // //   const matingMutation = {
+  // //     mutateWeight: .25,
+  // //     mutateEnabled: .25,
+  // //     mutateDisabled: .25,
+  // //     mutateSplit: .3,
+  // //     mutateInsert: .5
+  // //   }
+  // //   const demoGenome = createDemo2(innovation)
+  // //   const genomes = []
+  // //   for(let i = 0; i < 3; i++) {
+  // //     const genome = mutateGenome(demoGenome, innovation, matingMutation)
+  // //     genome.genomeId = i + 1
+  // //     genomes.push(genome)
+  // //   }
+
+  // //   competeAsync(genomes, 4).then(fitness => {
+  // //     repopulate(genomes, fitness, 10, innovation, matingMutation)
+  // //     console.log(genomes.length)
+  // //   })
+  // // })()
+
+</script>
+
+## Fight
+
+We now have all the recipients for breeding snake players. Let's plug all of that into an evolutionary loop. We will first generate a base population, with input neurons for every cell in the board, output neurons for right and left, and no links. Then iterate:
+
+- Compete all genomes
+- Ditch the lowest half of each species
+- Ditch any species lower than the average and older than X generations
+- Repopulate with offspring of the remaining species, introduce mutations
+- Re-sort into species
+- Loop
+
+We pause every so often (every 10 generations, or every time a new genome beats the fitness record). We also track the progression of fitness from a generation to the next. 
+
+You can play with all the parameters we have discussed.
+
+<div id="run-parameters"> </div>
+
+<button id="run-btn">Run</button>
+<button id="run-stop">Stop</button>
+<input type="checkbox" checked id="run-pause-demo"/>Pause for demos every 10 generations
+<input type="checkbox" checked id="run-pause-fit"/>Pause when a new record is achieved
+(I recommend you uncheck these boxes while the fitness is < 2, you can check them while the loop is running)
+
+Generation <span id="run-gen"></span>
+Max fitness <span id="run-fitness"></span>
+Number of species <span id="run-species"></span>
+<pre id="run-game"></pre>
+<div id="run-genome" style="height: 400px; border: 1pt solid"></div>
+
+Maximum fitness over generations:
+<div id="run-diagram" style="height: 400px;"> </div>
+
+<script src="/demo_libs/d3.js"></script>
+<script src="/demo_libs/LineChart.js"></script>
+
+<script>
+
+//   const runParametersDiv = document.getElementById("run-parameters")
+//   const runBtn = document.getElementById("run-btn")
+//   const runFitness = document.getElementById("run-fitness")
+//   const runSpecies = document.getElementById("run-species")
+//   const runGen = document.getElementById("run-gen")
+//   const runGenome = document.getElementById("run-genome")
+//   const runStopBtn = document.getElementById("run-stop")
+//   const runGame = document.getElementById("run-game")
+//   const runPauseDemo = document.getElementById("run-pause-demo")
+//   const runPauseFit = document.getElementById("run-pause-fit")
+//   const runDiagram = document.getElementById("run-diagram")
+
+// const displayParameters = (parentElt) => {
+//   const parentId = `${Math.floor(Math.random() * 1000000)}`
+//   const elements = []
+//   const getElementId = (id) => `param-${parentId}-${id}`
+//   const createElt = (label, defaultValue, id, float = false) => {
+//     parentElt.innerHTML += `${label}: <input style="width: 4em" id="${getElementId(id)}" value="${defaultValue}"/><br/>`
+//     elements.push({id, float})
+//   }
+//   const getValues = () => {
+//     const res = { }
+//     elements.forEach(({id, float}) => {
+//       const val = document.getElementById(getElementId(id)).value
+//       if (float) {
+//         res[id] = Number.parseFloat(val)
+//       } else {
+//         res[id] = Number.parseInt(val)
+//       }
+//     })
+//     return res
+//   }
+//   createElt("Board size", 6, "size", true)
+//   createElt("Population", 100, "population")
+//   createElt("Iterations per game", 8, "iterationsPerGame")
+//   createElt("Prune ratio (keep % of population)", .8, "pruneRatio", true)
+//   createElt("Age threshold", 5, "ageThreshold")
+
+//   parentElt.innerHTML += `<b>Mutation</b><br/>`
+//   createElt("Mutate weight chance", .05, "mutateWeight", true)
+//   createElt("Mutate enabled", .01, "mutateEnabled", true)
+//   createElt("Mutate disabled", .001, "mutateDisabled", true)
+//   createElt("Split link", .01, "mutateSplit", true)
+//   createElt("Insert link", .02, "mutateInsert", true)
+
+//   parentElt.innerHTML += "<b>Speciation</b><br/>"
+//   createElt("Importance of disjoint links", .5, "disjointCoeff", true)
+//   createElt("Importance of excess links", 1, "excessCoeff", true)
+//   createElt("Importance of weight difference", .1, "weightCoeff", true)
+//   createElt("Threshold", 1, "speciationThreshold", true)
+
+//   return getValues
+// }
+
+// const bestGenome = (genomes, fitness) => {
+//   let genome = genomes[0]
+//   genomes.forEach(g => {
+//     if (g.fitness > genome.fitness) {
+//       genome = g
+//     }
+//   })
+//   return genome
+// }
+
+// const loopAsync = async ({boardSize, population, iterationsPerGame, mutationCoeffs, speciationCoeffs, speciationThreshold, ageThreshold, control, pruneRatio}) => {
+
+//   // Generate base population
+//   const innovation = innovationCounter()
+//   let genomes = initiateGenomes(boardSize, population, innovation)
+
+//   // Initiate speciation
+//   const genomesAreCompatible = compatibilityProvider(speciationCoeffs, speciationThreshold)
+//   const speciesList = []
+//   groupIntoSpecies(speciesList, genomes, genomesAreCompatible, innovation)
+
+//   let generation = 0
+//   while (control.running) {
+//     generation++
+//     // Compete
+//     const fitness = await competeAsync(genomes, iterationsPerGame, boardSize)
+
+//     // Callback to control, sending the fittest genome
+//     const best = bestGenome(genomes, fitness)
+//     await control.onGenAsync(generation, speciesList, best)
+
+//     // Age population
+//     speciesList.forEach(species => species.speciesAge++)
+//     pruneSpecies(speciesList, fitness, ageThreshold, pruneRatio)
+//     // Get a list of all genomes still alive
+//     genomes = speciesList.reduce((genomes, species) => genomes.concat(species.genomes), [])
+//     repopulate(genomes, fitness, population, innovation, mutationCoeffs)
+//     groupIntoSpecies(speciesList, genomes, genomesAreCompatible, innovation)
+//     await sleepAsync(1)
+//   }
+// }
+
+// const getParameters = displayParameters(runParametersDiv)
+
+// const createControl = (boardSize) => {
+//   let bestFitness = 2
+//   const fitnessDiagram = createFitnessDiagramRenderer(runDiagram)
+//   const results = []
+//   const control = {
+//     running: true,
+//     onGenAsync: async (generation, speciesList, best) => {
+//       results.push({
+//         generation,
+//         fitness: best.fitness,
+//         best
+//       })
+//       runGen.innerHTML = generation
+//       runSpecies.innerHTML = speciesList.length
+//       runFitness.innerHTML = best.fitness
+
+//       if ((generation % 10 === 0 && runPauseDemo.checked) || best.fitness > bestFitness && runPauseFit.checked) {
+//         fitnessDiagram(results)
+//         genomeToGraph(best, runGenome, false)
+//         await sleepAsync(60)
+//         await gameAsync(AIPlayer(reduceGenome(best), genomeName(best), boardSize), {render: render(runGame), wait: () => sleepAsync(60), maxGame: 500, boardSize})
+//       }
+
+//       if (best.fitness > bestFitness) {
+//         bestFitness = best.fitness
+//       }
+//     }
+//   }
+//   return control
+// }
+
+// let runnin = false
+// runBtn.onclick = () => {
+//   if (runnin) {
+//     return
+//   }
+//   runnin = true
+//   const params = getParameters()
+//   const mutationCoeffs = params
+//   const speciationCoeffs = params
+//   params.boardSize = { rows: params.size, cols: params.size }
+//   const control = createControl(params.boardSize)
+//   params.mutationCoeffs = mutationCoeffs
+//   params.speciationCoeffs = speciationCoeffs
+//   params.control = control
+//   runStopBtn.onclick = () => {
+//     control.running = false
+//     runnin = false
+//   }
+//   loopAsync(params)
+// }
+
+
+// const createFitnessDiagramRenderer = (element) => {
+//   let elt = null
+//   element.innerHTML = ""
+//   return (fitnessOverTime) => {
+//     chart = LineChart(fitnessOverTime, {
+//       x: d => d.generation,
+//       y: d => d.fitness,
+//       yLabel: "Fitness",
+//       height: element.height,
+//       width: element.width,
+//       color: "steelblue"
+//     })
+//     if (elt) {
+//       element.removeChild(elt)
+//     }
+//     elt = chart
+//     element.appendChild(chart)
+//   }
+// }
+
+</script>
+
+  </body>
+</html>
